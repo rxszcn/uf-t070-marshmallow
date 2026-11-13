@@ -218,6 +218,7 @@ class SchemaOpts:
         self.load_only = getattr(meta, "load_only", ())
         self.dump_only = getattr(meta, "dump_only", ())
         self.unknown = getattr(meta, "unknown", RAISE)
+        self.raise_on_trimmed = getattr(meta, "raise_on_trimmed", False)
         self.register = getattr(meta, "register", True)
         self.many = getattr(meta, "many", False)
 
@@ -314,6 +315,9 @@ class Schema(metaclass=SchemaMeta):
     opts: typing.Any
     _declared_fields: dict[str, Field] = {}
     _hooks: dict[str, list[tuple[str, bool, dict]]] = {}
+    #: Data keys of declared fields trimmed from ``load_fields`` by
+    #: ``only``/``exclude``. Computed by `_init_fields`.
+    _trimmed_load_keys: frozenset[str] = frozenset()
 
     class Meta:
         """Options object for a Schema.
@@ -398,6 +402,16 @@ class Schema(metaclass=SchemaMeta):
         """Whether to exclude, include, or raise an error for unknown fields in the data.
         Use `EXCLUDE`, `INCLUDE` or `RAISE`.
         """
+        raise_on_trimmed: typing.ClassVar[bool]
+        """If `True`, fields that were trimmed from the schema by `only`/`exclude`
+        are treated as ordinary unknown fields on deserialization (raising an
+        error when `unknown` is `RAISE`). If `False` (default), such fields are
+        silently ignored in input data: they are neither validated nor included
+        in the result. `dump_only` fields are unaffected and are always reported
+        as unknown fields.
+
+        .. versionadded:: 4.5.0
+        """
         register: typing.ClassVar[bool]
         """Whether to register the `Schema <marshmallow.Schema>` with marshmallow's internal
         class registry. Must be `True` if you intend to refer to this `Schema <marshmallow.Schema>`
@@ -434,6 +448,7 @@ class Schema(metaclass=SchemaMeta):
         self.unknown: types.UnknownOption = (
             self.opts.unknown if unknown is None else unknown
         )
+        self.raise_on_trimmed: bool = self.opts.raise_on_trimmed
         self._normalize_nested_options()
         #: Dictionary mapping field_names -> :class:`Field` objects
         self.fields: dict[str, Field] = {}
@@ -693,6 +708,12 @@ class Schema(metaclass=SchemaMeta):
                     for field_name, field_obj in self.load_fields.items()
                 }
                 for key in set(data) - fields:
+                    # Fields trimmed by only/exclude are ignored on input:
+                    # they are neither validated nor included in the result,
+                    # even when unknown == RAISE, unless the schema opts back
+                    # into reporting them via `raise_on_trimmed`.
+                    if not self.raise_on_trimmed and key in self._trimmed_load_keys:
+                        continue
                     value = data[key]
                     if unknown == INCLUDE:
                         ret_d[key] = value
@@ -1051,6 +1072,25 @@ class Schema(metaclass=SchemaMeta):
         self.fields = fields_dict
         self.dump_fields = dump_fields
         self.load_fields = load_fields
+
+        # Data keys of declared fields that were trimmed from load_fields by
+        # the only/exclude options. On deserialization, input values under
+        # these keys are silently ignored (neither validated nor included in
+        # the result) unless the `raise_on_trimmed` option is enabled.
+        # dump_only fields are deliberately left out so that they keep being
+        # reported as unknown fields.
+        load_data_keys = {
+            field_obj.data_key if field_obj.data_key is not None else name
+            for name, field_obj in load_fields.items()
+        }
+        trimmed_keys = set()
+        for name, field_obj in self.declared_fields.items():
+            if field_obj.dump_only or name in self.dump_only:
+                continue
+            data_key = field_obj.data_key if field_obj.data_key is not None else name
+            if data_key not in load_data_keys:
+                trimmed_keys.add(data_key)
+        self._trimmed_load_keys = frozenset(trimmed_keys)
 
     def on_bind_field(self, field_name: str, field_obj: Field) -> None:
         """Hook to modify a field when it is bound to the `Schema <marshmallow.Schema>`.

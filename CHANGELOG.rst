@@ -1,6 +1,18 @@
 Changelog
 =========
 
+4.5.0 (unreleased)
+------------------
+
+Features:
+
+- Fields trimmed by ``only``/``exclude`` (including dotted paths) are now
+  silently ignored on deserialization: input values for them are neither
+  validated nor included in the result, even when ``unknown`` is ``RAISE``.
+  Set ``Meta.raise_on_trimmed = True`` to fall back to reporting them as
+  unknown fields. ``dump_only`` fields are unaffected and keep being
+  reported as unknown fields.
+
 4.4.0 (2026-11-03)
 ------------------
 
